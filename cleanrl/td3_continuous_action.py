@@ -68,6 +68,7 @@ class Args:
     """the frequency of training policy (delayed)"""
     noise_clip: float = 0.5
     """noise clip parameter of the Target Policy Smoothing Regularization"""
+    eval_episodes: int = 10
 
 
 def make_env(env_id, seed, idx, capture_video, run_name):
@@ -284,20 +285,20 @@ if __name__ == "__main__":
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
         torch.save((actor.state_dict(), qf1.state_dict(), qf2.state_dict()), model_path)
         print(f"model saved to {model_path}")
+    if args.eval_episodes > 0:
         from cleanrl_utils.evals.td3_eval import evaluate
-
         episodic_returns = evaluate(
             model_path,
             make_env,
             args.env_id,
-            eval_episodes=10,
+            args.eval_episodes,
             run_name=f"{run_name}-eval",
             Model=(Actor, QNetwork),
             device=device,
             exploration_noise=args.exploration_noise,
         )
-        for idx, episodic_return in enumerate(episodic_returns):
-            writer.add_scalar("eval/episodic_return", episodic_return, idx)
+        # for idx, episodic_return in enumerate(episodic_returns):
+        #     writer.add_scalar("eval/episodic_return", episodic_return, idx)
 
         if args.upload_model:
             from cleanrl_utils.huggingface import push_to_hub
