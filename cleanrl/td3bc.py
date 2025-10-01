@@ -24,7 +24,7 @@ class Args:
     seed: int = 1  # random seed of the experiment
     torch_deterministic: bool = False  # if toggled, `torch.backends.c
     cuda: bool = True  # if toggled, cuda will be enabled by default
-    track: bool = False  # if toggled, this experiment will be tracked with wandb
+    track: bool = True  # if toggled, this experiment will be tracked with wandb
     wandb_project_name: str = "funrl"  # the wandb's project name
     wandb_entity: str = None  # the entity (team) of wandb's project
     capture_video: bool = False  # whether to capture videos of the agent performance
@@ -48,6 +48,7 @@ class Args:
     explore_noise: float = 0.1  # std of Gaussian exploration noise
     start_timesteps: int = 25000  # time steps initial random policy is used (optional)
     eval_episodes: int = 10  # number of episodes to evaluate the agent
+    eval_freq: int = 5000  # how often the evaluation step is performed
 
 def make_env(env_id, seed, idx, capture_video, run_name):
     def thunk():
@@ -137,7 +138,8 @@ if __name__ == "__main__":
             with torch.no_grad():
                 actions = actor(torch.Tensor(obs).to(device), deterministic=True)
                 #TBD action_scale
-                actions += torch.normal(0, args.explore_noise, size=actions.shape).to(device)
+                # actions += torch.normal(0, args.explore_noise, size=actions.shape).to(device)
+                actions += args.explore_noise * torch.randn_like(actions)
                 actions = actions.cpu().numpy().clip(envs.single_action_space.low, envs.single_action_space.high)
 
 
@@ -178,8 +180,8 @@ if __name__ == "__main__":
                 next_actions = (actor_target(data.next_observations, deterministic=True) + clipped_noise).clamp(
                     envs.single_action_space.low[0], envs.single_action_space.high[0]
                 )
-                target_q1_values = q_net1_target(data.next_observations, next_actions)
-                target_q2_values = q_net2_target(data.next_observations, next_actions)
+                target_q1_values = q_net1_target(data.next_observations, next_actions).flatten()
+                target_q2_values = q_net2_target(data.next_observations, next_actions).flatten()
                 target_q_values = torch.min(target_q1_values, target_q2_values)
                 target_q_values = data.rewards.flatten() + (1 - data.dones.flatten()) * args.gamma * target_q_values
             
@@ -218,22 +220,34 @@ if __name__ == "__main__":
                     target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
                 for param, target_param in zip(q_net2.parameters(), q_net2_target.parameters()):
                     target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
+            from cleanrl_utils.evals.td3_bc_eval import evaluate
+            if global_step % args.eval_freq == 0:
+                episodic_returns = evaluate(
+                                        actor,
+                                        make_env,
+                                        args.env_id,
+                                        eval_episodes=10,
+                                        run_name = f"{run_name}_eval",
+                                        device = device,
+                                        exploration_noise=args.explore_noise,
+                                    )
+
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.funrl_model"
         torch.save(actor.state_dict(), model_path)
         print(f"model save to {model_path}")
-        from cleanrl_utils.evals.td3_eval import evaluate
+        # from cleanrl_utils.evals.td3_eval import evaluate
 
-        episodic_returns = evaluate(
-            model_path,
-            make_env,
-            args.env_id,
-            eval_episodes=10,
-            run_name = f"{run_name}_eval",
-            Model = (Actor, Critic),
-            device = device,
-            exploration_noise=args.explore_noise,
-        )
+        # episodic_returns = evaluate(
+        #     model_path,
+        #     make_env,
+        #     args.env_id,
+        #     eval_episodes=10,
+        #     run_name = f"{run_name}_eval",
+        #     Model = (Actor, Critic),
+        #     device = device,
+        #     exploration_noise=args.explore_noise,
+        # )
 
     envs.close()
 

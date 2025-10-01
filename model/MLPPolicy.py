@@ -4,9 +4,9 @@ import torch.nn.functional as F
 class Actor(torch.nn.Module):
     def __init__(self, state_dim, action_dim):
         super(Actor, self).__init__()
-        self.fc1 = torch.nn.Linear(state_dim, 128)
-        self.fc2 = torch.nn.Linear(128, 128)
-        self.mean_head = torch.nn.Linear(128, action_dim)
+        self.fc1 = torch.nn.Linear(state_dim, 256)
+        self.fc2 = torch.nn.Linear(256, 256)
+        self.mean_head = torch.nn.Linear(256, action_dim)
         self.log_std_head = nn.Parameter(torch.zeros(action_dim))
 
     def forward(self, x, deterministic=False):
@@ -15,6 +15,13 @@ class Actor(torch.nn.Module):
         if deterministic:
             mean = self.mean_head(x)
             action = torch.tanh(mean)
+            # log_std = self.log_std_head.expand_as(mean)
+            # std = torch.exp(log_std)
+            # std = torch.clamp(std, min=1e-6, max=1.0)
+            # mean = torch.tanh(mean)
+            # action = torch.tanh(mean)
+            # dist = torch.distributions.Normal(mean, std)
+            # action = torch.tanh(dist.rsample())
             return action
         else:
             mean = self.mean_head(x)

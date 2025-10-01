@@ -6,35 +6,36 @@ import torch.nn as nn
 
 
 def evaluate(
-    model_path: str,
+    actor: nn.Module,
     make_env: Callable,
     env_id: str,
     eval_episodes: int,
     run_name: str,
-    Model: nn.Module,
     device: torch.device = torch.device("cpu"),
     capture_video: bool = True,
     exploration_noise: float = 0.1,
 ):
     envs = gym.vector.SyncVectorEnv([make_env(env_id, 0, 0, capture_video, run_name)])
-    actor = Model[0](envs).to(device)
-    qf1 = Model[1](envs).to(device)
-    qf2 = Model[1](envs).to(device)
-    actor_params, qf1_params, qf2_params = torch.load(model_path, map_location=device)
-    actor.load_state_dict(actor_params)
+    actor = actor.to(device)
+    # actor = Model[0](envs).to(device)
+    # qf1 = Model[1](envs).to(device)
+    # qf2 = Model[1](envs).to(device)
+    # actor_params, qf1_params, qf2_params = torch.load(model_path, map_location=device)
+    # actor.load_state_dict(actor_params)
     actor.eval()
-    qf1.load_state_dict(qf1_params)
-    qf2.load_state_dict(qf2_params)
-    qf1.eval()
-    qf2.eval()
+    # qf1.load_state_dict(qf1_params)
+    # qf2.load_state_dict(qf2_params)
+    # qf1.eval()
+    # qf2.eval()
     # note: qf1 and qf2 are not used in this script
 
     obs, _ = envs.reset()
     episodic_returns = []
     while len(episodic_returns) < eval_episodes:
         with torch.no_grad():
-            actions = actor(torch.Tensor(obs).to(device))
-            actions += torch.normal(0, actor.action_scale * exploration_noise)
+            actions = actor(torch.Tensor(obs).to(device), deterministic=True)
+            # actions += torch.normal(0, actor.action_scale * exploration_noise)
+            actions += exploration_noise * torch.randn_like(actions)
             actions = actions.cpu().numpy().clip(envs.single_action_space.low, envs.single_action_space.high)
 
         next_obs, _, _, _, infos = envs.step(actions)

@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import tyro
-from torch.utils.tensorboard import SummaryWriter
+# from torch.utils.tensorboard import SummaryWriter
 
 from cleanrl_utils.buffers import ReplayBuffer
 
@@ -28,11 +28,11 @@ class Args:
     """if toggled, cuda will be enabled by default"""
     track: bool = False
     """if toggled, this experiment will be tracked with Weights and Biases"""
-    wandb_project_name: str = "cleanRL"
+    wandb_project_name: str = "funrl"
     """the wandb's project name"""
     wandb_entity: str = None
     """the entity (team) of wandb's project"""
-    capture_video: bool = False
+    capture_video: bool = True
     """whether to capture videos of the agent performances (check out `videos` folder)"""
     save_model: bool = False
     """whether to save model into the `runs/{run_name}` folder"""
@@ -69,6 +69,11 @@ class Args:
     noise_clip: float = 0.5
     """noise clip parameter of the Target Policy Smoothing Regularization"""
     eval_episodes: int = 10
+    #bc_coef
+    alpha: float = 2.5
+    #td3bc optional
+    add_bc: bool = False
+    eval_freq: int = 5000
 
 
 def make_env(env_id, seed, idx, capture_video, run_name):
@@ -136,7 +141,7 @@ class Actor(nn.Module):
 if __name__ == "__main__":
 
     args = tyro.cli(Args)
-    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+    run_name = f"{args.env_id}__{args.exp_name}__mymodel__{args.seed}__{int(time.time())}"
     if args.track:
         import wandb
 
@@ -149,11 +154,11 @@ if __name__ == "__main__":
             monitor_gym=True,
             save_code=True,
         )
-    writer = SummaryWriter(f"runs/{run_name}")
-    writer.add_text(
-        "hyperparameters",
-        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
-    )
+    # writer = SummaryWriter(f"runs/{run_name}")
+    # writer.add_text(
+    #     "hyperparameters",
+    #     "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+    # )
 
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
@@ -168,13 +173,22 @@ if __name__ == "__main__":
         [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name) for i in range(args.num_envs)]
     )
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
-
-    actor = Actor(envs).to(device)
-    qf1 = QNetwork(envs).to(device)
-    qf2 = QNetwork(envs).to(device)
-    qf1_target = QNetwork(envs).to(device)
-    qf2_target = QNetwork(envs).to(device)
-    target_actor = Actor(envs).to(device)
+    from model.MLPPolicy import Actor
+    from model.MLPCrtitic import Critic
+    state_dim = int(np.prod(envs.single_observation_space.shape))
+    action_dim = int(np.prod(envs.single_action_space.shape))
+    actor = Actor(state_dim, action_dim).to(device)
+    qf1 = Critic(state_dim, action_dim).to(device)
+    qf2 = Critic(state_dim, action_dim).to(device)
+    # actor = Actor(envs).to(device)
+    # qf1 = QNetwork(envs).to(device)
+    # qf2 = QNetwork(envs).to(device)
+    # qf1_target = QNetwork(envs).to(device)
+    # qf2_target = QNetwork(envs).to(device)
+    # target_actor = Actor(envs).to(device)
+    qf1_target = Critic(state_dim, action_dim).to(device)
+    qf2_target = Critic(state_dim, action_dim).to(device)
+    target_actor = Actor(state_dim, action_dim).to(device)
     target_actor.load_state_dict(actor.state_dict())
     qf1_target.load_state_dict(qf1.state_dict())
     qf2_target.load_state_dict(qf2.state_dict())
@@ -200,8 +214,9 @@ if __name__ == "__main__":
             actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
         else:
             with torch.no_grad():
-                actions = actor(torch.Tensor(obs).to(device))
-                actions += torch.normal(0, actor.action_scale * args.exploration_noise)
+                actions = actor(torch.Tensor(obs).to(device), deterministic=True)
+                # actions += torch.normal(0, actor.action_scale * args.exploration_noise)
+                actions += args.exploration_noise * torch.randn_like(actions)
                 actions = actions.cpu().numpy().clip(envs.single_action_space.low, envs.single_action_space.high)
 
         # TRY NOT TO MODIFY: execute the game and log data.
@@ -212,8 +227,16 @@ if __name__ == "__main__":
             for info in infos["final_info"]:
                 if info is not None:
                     print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
-                    writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
-                    writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
+                    # writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
+                    # writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
+                    if args.track:
+                        episodic_return = info["episode"]["r"]
+                        episodic_length = info["episode"]["l"]
+                        wandb.log({
+                            "charts/episodic_return": episodic_return,
+                            "charts/episodic_length": episodic_length,
+                            "global_step": global_step
+                        })
                     break
 
         # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
@@ -230,11 +253,13 @@ if __name__ == "__main__":
         if global_step > args.learning_starts:
             data = rb.sample(args.batch_size)
             with torch.no_grad():
+                # clipped_noise = (torch.randn_like(data.actions, device=device) * args.policy_noise).clamp(
+                #     -args.noise_clip, args.noise_clip
+                # ) * target_actor.action_scale
                 clipped_noise = (torch.randn_like(data.actions, device=device) * args.policy_noise).clamp(
                     -args.noise_clip, args.noise_clip
-                ) * target_actor.action_scale
-
-                next_state_actions = (target_actor(data.next_observations) + clipped_noise).clamp(
+                )
+                next_state_actions = (target_actor(data.next_observations, deterministic=True) + clipped_noise).clamp(
                     envs.single_action_space.low[0], envs.single_action_space.high[0]
                 )
                 qf1_next_target = qf1_target(data.next_observations, next_state_actions)
@@ -254,11 +279,25 @@ if __name__ == "__main__":
             q_optimizer.step()
 
             if global_step % args.policy_frequency == 0:
-                actor_loss = -qf1(data.observations, actor(data.observations)).mean()
+                actor_loss = -qf1(data.observations, actor(data.observations, deterministic=True)).mean()
+                if args.add_bc:
+                    bc_loss = F.mse_loss(actor(data.observations, deterministic=True), data.actions)
+                    print("bc loss: ", bc_loss)
+                    # import pdb; pdb.set_trace()
+                    actor_loss = actor_loss + args.alpha * bc_loss
                 actor_optimizer.zero_grad()
                 actor_loss.backward()
                 actor_optimizer.step()
-
+                if args.track:
+                    wandb.log({
+                        "losses/q1_loss": qf1_loss.item(),
+                        "losses/q2_loss": qf2_loss.item(),
+                        "losses/q_loss": qf_loss.item() / 2.0,
+                        "losses/actor_loss": actor_loss.item(),
+                        "losses/bc_loss": bc_loss.item() if args.add_bc else 0,
+                        "charts/SPS": int(global_step / (time.time() - start_time)),
+                        "global_step": global_step
+                    })
                 # update the target network
                 for param, target_param in zip(actor.parameters(), target_actor.parameters()):
                     target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
@@ -266,53 +305,63 @@ if __name__ == "__main__":
                     target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
                 for param, target_param in zip(qf2.parameters(), qf2_target.parameters()):
                     target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
-
-            if global_step % 100 == 0:
-                writer.add_scalar("losses/qf1_values", qf1_a_values.mean().item(), global_step)
-                writer.add_scalar("losses/qf2_values", qf2_a_values.mean().item(), global_step)
-                writer.add_scalar("losses/qf1_loss", qf1_loss.item(), global_step)
-                writer.add_scalar("losses/qf2_loss", qf2_loss.item(), global_step)
-                writer.add_scalar("losses/qf_loss", qf_loss.item() / 2.0, global_step)
-                writer.add_scalar("losses/actor_loss", actor_loss.item(), global_step)
-                print("SPS:", int(global_step / (time.time() - start_time)))
-                writer.add_scalar(
-                    "charts/SPS",
-                    int(global_step / (time.time() - start_time)),
-                    global_step,
-                )
+            from cleanrl_utils.evals.td3_eval import evaluate
+            if global_step % args.eval_freq == 0:
+                episodic_returns = evaluate(
+                                        actor,
+                                        make_env,
+                                        args.env_id,
+                                        eval_episodes=10,
+                                        run_name = f"{run_name}_eval",
+                                        device = device,
+                                        exploration_noise=args.exploration_noise,
+                                    )
+            # if global_step % 100 == 0:
+            #     writer.add_scalar("losses/qf1_values", qf1_a_values.mean().item(), global_step)
+            #     writer.add_scalar("losses/qf2_values", qf2_a_values.mean().item(), global_step)
+            #     writer.add_scalar("losses/qf1_loss", qf1_loss.item(), global_step)
+            #     writer.add_scalar("losses/qf2_loss", qf2_loss.item(), global_step)
+            #     writer.add_scalar("losses/qf_loss", qf_loss.item() / 2.0, global_step)
+            #     writer.add_scalar("losses/actor_loss", actor_loss.item(), global_step)
+            #     print("SPS:", int(global_step / (time.time() - start_time)))
+            #     writer.add_scalar(
+            #         "charts/SPS",
+            #         int(global_step / (time.time() - start_time)),
+            #         global_step,
+            #     )
 
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
         torch.save((actor.state_dict(), qf1.state_dict(), qf2.state_dict()), model_path)
         print(f"model saved to {model_path}")
-    if args.eval_episodes > 0:
-        from cleanrl_utils.evals.td3_eval import evaluate
-        episodic_returns = evaluate(
-            model_path,
-            make_env,
-            args.env_id,
-            args.eval_episodes,
-            run_name=f"{run_name}-eval",
-            Model=(Actor, QNetwork),
-            device=device,
-            exploration_noise=args.exploration_noise,
-        )
+    # if args.eval_episodes > 0:
+    #     from cleanrl_utils.evals.td3_eval import evaluate
+    #     episodic_returns = evaluate(
+    #         model_path,
+    #         make_env,
+    #         args.env_id,
+    #         args.eval_episodes,
+    #         run_name=f"{run_name}-eval",
+    #         Model=(Actor, QNetwork),
+    #         device=device,
+    #         exploration_noise=args.exploration_noise,
+    #     )
         # for idx, episodic_return in enumerate(episodic_returns):
         #     writer.add_scalar("eval/episodic_return", episodic_return, idx)
 
-        if args.upload_model:
-            from cleanrl_utils.huggingface import push_to_hub
+        # if args.upload_model:
+        #     from cleanrl_utils.huggingface import push_to_hub
 
-            repo_name = f"{args.env_id}-{args.exp_name}-seed{args.seed}"
-            repo_id = f"{args.hf_entity}/{repo_name}" if args.hf_entity else repo_name
-            push_to_hub(
-                args,
-                episodic_returns,
-                repo_id,
-                "TD3",
-                f"runs/{run_name}",
-                f"videos/{run_name}-eval",
-            )
+        #     repo_name = f"{args.env_id}-{args.exp_name}-seed{args.seed}"
+        #     repo_id = f"{args.hf_entity}/{repo_name}" if args.hf_entity else repo_name
+        #     push_to_hub(
+        #         args,
+        #         episodic_returns,
+        #         repo_id,
+        #         "TD3",
+        #         f"runs/{run_name}",
+        #         f"videos/{run_name}-eval",
+        #     )
 
     envs.close()
-    writer.close()
+    # writer.close()
